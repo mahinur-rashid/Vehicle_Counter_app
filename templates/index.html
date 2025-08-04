@@ -250,47 +250,35 @@
 
         uploadForm.addEventListener('submit', function(e) {
             e.preventDefault();
-            
             const formData = new FormData();
             const file = videoFile.files[0];
-            
             if (!file) {
                 showError('Please select a video file');
                 return;
             }
-            
             formData.append('video', file);
-            
-            // Show loading state
             loading.style.display = 'block';
             uploadBtn.disabled = true;
             uploadBtn.textContent = 'Processing...';
             errorMessage.style.display = 'none';
-            
-            // Start video upload and processing
             fetch('/upload', {
                 method: 'POST',
                 body: formData
             })
-            .then(response => {
-                if (!response.ok) {
-                    throw new Error('Upload failed');
-                }
-                
-                // Hide loading and show video feed
+            .then(response => response.json())
+            .then(data => {
                 loading.style.display = 'none';
                 uploadBtn.disabled = false;
                 uploadBtn.textContent = 'Start Processing';
-                
-                // Set video feed source to the streaming endpoint
-                videoFeed.src = '/upload?' + new URLSearchParams({
-                    timestamp: Date.now()
-                });
-                videoFeed.style.display = 'block';
-                videoPlaceholder.style.display = 'none';
-                
-                // Start polling for statistics
-                startStatsPolling();
+                if (data.success) {
+                    // Set video feed source to the streaming endpoint
+                    videoFeed.src = '/video_feed?' + new Date().getTime();
+                    videoFeed.style.display = 'block';
+                    videoPlaceholder.style.display = 'none';
+                    startStatsPolling();
+                } else {
+                    showError('Error processing video.');
+                }
             })
             .catch(error => {
                 loading.style.display = 'none';

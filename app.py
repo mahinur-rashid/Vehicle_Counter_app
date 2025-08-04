@@ -9,7 +9,11 @@ import base64
 import tempfile
 import os
 
+from threading import Lock
+
 app = Flask(__name__)
+video_data_buffer = None  # Store uploaded video in memory
+video_data_lock = Lock()
 
 # Load the YOLO model
 model = YOLO('yolov8x.pt')
@@ -74,7 +78,9 @@ class VideoProcessor:
             'total': 0
         }
         self.tracker = ObjectTracker()
-        self.unique_objects = set()
+        self.counted_ids = set()  # Track counted object IDs
+        self.line_position = None  # Will be set based on frame size
+        self.line_orientation = 'horizontal'  # or 'vertical'
         self.start_time = None
         self.end_time = None
 
@@ -87,42 +93,67 @@ class VideoProcessor:
             'total': 0
         }
         self.tracker = ObjectTracker()
-        self.unique_objects = set()
+        self.counted_ids = set()
+        self.line_position = None
 
     def process_frame(self, frame):
+        # Set line position if not set
+        if self.line_position is None:
+            h, w = frame.shape[:2]
+            if self.line_orientation == 'horizontal':
+                self.line_position = int(h * 2 / 3)  # Set line at 2/3 down the frame
+            else:
+                self.line_position = w // 2
+
+        # Draw the counting line
+        if self.line_orientation == 'horizontal':
+            cv2.line(frame, (0, self.line_position), (frame.shape[1], self.line_position), (0, 0, 255), 2)
+        else:
+            cv2.line(frame, (self.line_position, 0), (self.line_position, frame.shape[0]), (0, 0, 255), 2)
+
         results = model(frame, conf=0.3)
         current_detections = []
-        
         for r in results:
             boxes = r.boxes
             for box in boxes:
                 cls = int(box.cls[0])
                 conf = float(box.conf[0])
-                
                 if cls in target_classes:
                     x1, y1, x2, y2 = map(int, box.xyxy[0])
                     current_detections.append((cls, (x1, y1, x2, y2), conf))
-        
+
         # Update tracker
         tracked_objects = self.tracker.update(current_detections)
-        
+
         # Process tracked objects
         for obj_id, obj_data in tracked_objects.items():
             cls = obj_data['class']
             class_name = target_classes[cls]
-            if obj_id not in self.unique_objects and len(obj_data['positions']) >= 3:
-                self.unique_objects.add(obj_id)
-                self.counter[target_classes[cls]] += 1
-                self.counter['total'] += 1
-            
+            positions = obj_data['positions']
+            last_pos = positions[-1]
+
+            # Only count the first time an object crosses the line, in any direction
+            if obj_id not in self.counted_ids and len(positions) >= 2:
+                prev_pos = positions[-2]
+                crossed = False
+                if self.line_orientation == 'horizontal':
+                    # Check if object crossed the horizontal line between previous and current position (any direction)
+                    if (prev_pos[1] < self.line_position and last_pos[1] >= self.line_position) or \
+                       (prev_pos[1] > self.line_position and last_pos[1] <= self.line_position):
+                        crossed = True
+                else:
+                    # Check if object crossed the vertical line (any direction)
+                    if (prev_pos[0] < self.line_position and last_pos[0] >= self.line_position) or \
+                       (prev_pos[0] > self.line_position and last_pos[0] <= self.line_position):
+                        crossed = True
+                if crossed:
+                    self.counted_ids.add(obj_id)
+                    self.counter[class_name] += 1
+                    self.counter['total'] += 1
+
             # Enhanced visualization with both ID and class name
-            last_pos = obj_data['positions'][-1]
             x, y = last_pos
-            
-            # Draw circle at centroid
             cv2.circle(frame, last_pos, 5, (0, 255, 0), -1)
-            
-            # Draw ID and class name with better formatting
             label = f"ID:{obj_id} ({class_name})"
             cv2.putText(frame, label, (x-10, y-10),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
@@ -133,7 +164,6 @@ class VideoProcessor:
             text = f'{class_name}: {count}'
             cv2.putText(frame, text, (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
             y_pos += 40
-        
         return frame
 
     def get_final_stats(self):
@@ -150,70 +180,61 @@ video_processor = VideoProcessor()
 def index():
     return render_template('index.html')
 
+
+# Upload endpoint: stores video in memory
 @app.route('/upload', methods=['POST'])
 def upload_video():
+    global video_data_buffer
     if 'video' not in request.files:
         return jsonify({'error': 'No video file provided'}), 400
-    
     video_file = request.files['video']
     if video_file.filename == '':
         return jsonify({'error': 'No video file selected'}), 400
-    
-    # Read video data into memory
     video_data = video_file.read()
-    
-    # Create a temporary file in memory
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as temp_file:
-        temp_file.write(video_data)
-        temp_video_path = temp_file.name
-    
-    try:
-        # Reset counter for new video
-        video_processor.reset_counter()
-        video_processor.start_time = time.time()
-        
-        # Process video and return streaming response
-        return Response(
-            generate_processed_video(temp_video_path),
-            mimetype='multipart/x-mixed-replace; boundary=frame'
-        )
-    except Exception as e:
-        return jsonify({'error': f'Error processing video: {str(e)}'}), 500
-    finally:
-        # Clean up temporary file
-        if os.path.exists(temp_video_path):
-            os.unlink(temp_video_path)
+    with video_data_lock:
+        video_data_buffer = video_data
+    video_processor.reset_counter()
+    return jsonify({'success': True})
 
-def generate_processed_video(video_path):
-    cap = cv2.VideoCapture(video_path)
-    
+
+# Video feed endpoint: streams processed video
+@app.route('/video_feed')
+def video_feed():
+    return Response(generate_processed_video(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+def generate_processed_video():
+    global video_data_buffer
+    with video_data_lock:
+        if not video_data_buffer:
+            yield b'--frame\r\nContent-Type: text/plain\r\n\r\nNo video uploaded\r\n\r\n'
+            return
+        # Write buffer to temp file for OpenCV
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as temp_file:
+            temp_file.write(video_data_buffer)
+            temp_video_path = temp_file.name
+
+    cap = cv2.VideoCapture(temp_video_path)
     if not cap.isOpened():
         yield b'--frame\r\nContent-Type: text/plain\r\n\r\nError: Could not open video file\r\n\r\n'
+        os.unlink(temp_video_path)
         return
-    
     try:
+        video_processor.start_time = time.time()
         while cap.isOpened():
             success, frame = cap.read()
             if not success:
                 break
-            
-            # Process frame
             processed_frame = video_processor.process_frame(frame)
-            
-            # Encode frame as JPEG
             ret, buffer = cv2.imencode('.jpg', processed_frame)
             if not ret:
                 continue
-                
             frame_bytes = buffer.tobytes()
-            
-            # Yield frame in streaming format
             yield (b'--frame\r\n'
                    b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-    
     finally:
         video_processor.end_time = time.time()
         cap.release()
+        os.unlink(temp_video_path)
 
 @app.route('/stats')
 def get_stats():
@@ -225,4 +246,6 @@ def reset_counter():
     return jsonify({'message': 'Counter reset successfully'})
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    import os
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)

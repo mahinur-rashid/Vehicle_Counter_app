@@ -6,6 +6,23 @@ import time
 import io
 from datetime import datetime
 import base64
+"""
+Vehicle Counter Flask App
+------------------------
+A web-based vehicle counting application using YOLOv8 object detection and Flask.
+
+Features:
+- Upload video files through web interface
+- Real-time vehicle detection and counting
+- Supports detection of: persons, cars, buses, motorcycles
+- Live video stream with detection overlays
+- Real-time statistics display
+- Object tracking with unique IDs
+
+Author: mahinur-rashid
+License: MIT
+"""
+
 import tempfile
 import os
 
@@ -34,6 +51,10 @@ class ObjectTracker:
     def get_distance(self, pt1, pt2):
         return np.sqrt((pt1[0] - pt2[0])**2 + (pt1[1] - pt2[1])**2)
 
+    """
+    Tracks detected objects across video frames using simple centroid distance matching.
+    Assigns unique IDs to each object and maintains their position history.
+    """
     def update(self, detections):
         current_objects = {}
         
@@ -84,7 +105,11 @@ class VideoProcessor:
         self.start_time = None
         self.end_time = None
 
+    """
+    Handles video frame processing, vehicle counting, and statistics.
+    """
     def reset_counter(self):
+        """Reset all counters and tracking state."""
         self.counter = {
             'person': 0,
             'car': 0,
@@ -97,6 +122,13 @@ class VideoProcessor:
         self.line_position = None
 
     def process_frame(self, frame):
+        """
+        Process a single video frame: detect, track, and count vehicles.
+        Args:
+            frame: np.ndarray, input video frame
+        Returns:
+            np.ndarray: processed frame with overlays
+        """
         # Set line position if not set
         if self.line_position is None:
             h, w = frame.shape[:2]
@@ -167,6 +199,7 @@ class VideoProcessor:
         return frame
 
     def get_final_stats(self):
+        """Return final statistics after processing video."""
         processing_time = (self.end_time - self.start_time) if self.start_time and self.end_time else 0
         return {
             'processing_time': processing_time,
